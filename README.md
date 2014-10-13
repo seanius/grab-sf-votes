@@ -13,7 +13,7 @@ Prepare the database:
 
 Dump all the vote data from 2010 to 2014:
 
-    python collect_votes.py 2010 2014
+    python collect.py 2010 2014
 
 Setup
 -----
@@ -25,7 +25,7 @@ Practicalities
 --------------
 Basic things are very easy to change. The DB schema is simple, and I wrote
 it using an ORM specifically so that you can eaisly change the RDBMS just by
-porting the dable definitions and editing the connection string in db.py. 
+porting the table definitions and editing the connection string in db.py. 
 The code is somewhat modular; hopefully the functions will give you an idea
 of how things are done. There's a decent amount of boilerplate code for parsing
 and paginating Legistar's Telerik grid UI components, which might come in handy
