@@ -1,48 +1,177 @@
+#! /usr/bin/python
 """
+A python script to scrape voting records etc from the SF BoS legistar
+system.
+    - Sean Finney (seanius@gmail.com)
+
+Derived from:
+
 A webdriver/selenium based scraper for San Francisco Board of Supervisors
 voting data.
     - Troy Deck (troy.deque@gmail.com)
 """
-from selenium import webdriver
-from datetime import date
-import argparse
-import time
 import db
+
+import argparse
+import bs4
+import datetime
+import json
+import logging
+import os
+import re
+import requests
+import tempfile
+import time
 
 #############
 # Constants #
 #############
-PATIENCE = 2 # Seconds to wait after executing a JS action
+# website root
+BASE_SITE = 'https://sfgov.legistar.com'
+# first page to visit, to initialize the form and server-side state.
+VOTE_LISTING_FIRST_URL = 'https://sfgov.legistar.com/MainBody.aspx'
+# subsequent requesets to update the form UI and scrape the votes go here.
+VOTE_PAGING_FORM_URL = 'https://sfgov.legistar.com/DepartmentDetail.aspx?ID=7374&GUID=978C35A3-7173-49E6-8FAA-8EA34A7D4160&Mode=MainBody'
+
+# id of the element containing the voting table and navigation controls.
 VOTING_GRID_ID = 'ctl00_ContentPlaceHolder1_gridVoting_ctl00'
+# drop-down voting-year-selector
+YEAR_SELECTOR_ID = 'ctl00_ContentPlaceHolder1_lstTimePeriodVoting_DropDown'
+
+class LegistarNavigator(object):
+  """"Helper class to fetch/post data to legistar."""
+  def __init__(self):
+    # TODO: not a good location
+    self._cache_dir = './cache'
+    self.cookie = {}
+    self._asp_attrs = {}
+
+  def fetch(self, url, name, payload=None):
+    """GET/POST a URL into a local cache file.
+
+    Args:
+      url, string, the fully qualified URL.
+      name, string, unique name for file in cache dir.
+      payload, dict, if nonempty, k/v pairs to POST to URL.
+
+    this class also stashes a cookie between requests which can be
+    used to control sorting order etc.
+    
+    Returns:
+      bs4.BeautifulSoup of the fetched page.
+    """
+    cache_file = '%s/%s.html' % (self._cache_dir, name)
+    logging.info("%s -> %s" % (url, cache_file))
+    if not os.path.exists(cache_file):
+      tmp_file = tempfile.NamedTemporaryFile(delete=False)
+      if not payload:
+        response = requests.get(url, cookies=self.cookie)
+      else:
+        payload.update(self._asp_attrs)
+        response = requests.post(url, data=payload, cookies=self.cookie)
+      self.cookie = response.cookies
+      tmp_file.write(response.content)
+      os.rename(tmp_file.name, cache_file)
+
+    soup = bs4.BeautifulSoup(file(cache_file))
+    asp_attrs = ['__VIEWSTATE', '__EVENTVALIDATION', '__VIEWSTATEGENERATOR']
+    for asp_attr in asp_attrs:
+      attr_element = soup.find(id=asp_attr)
+      if attr_element and attr_element['value']:
+        self._asp_attrs[asp_attr] = attr_element['value']
+
+    return soup
+
+
+class VotingInterfaceInfo(object):
+  """An awkward but whatever helper class for parsing state of the form.
+  
+  after initializing with a bs4.BeautifulSoup instance from a scraped
+  voting page, this class should have some helpful pre-parsed attributes
+  for determining the state of the form, for manipulating it further.
+  namely:
+  
+    current_page, string, the current page number (for paginated results).
+    next_page, string, the next page number (for paginated results).  May also
+      be '...', in the case that there are more than 14 pages with results.
+    next_page_target, string, an arbitrary string in the page which needs to
+      be passed as the __EVENTTARGET in the POST, when paginating to the
+      next page number.
+    next_page_arg, string, same, but for __EVENTARGUMENT.
+    year_dropdown_indicies, dict, string -> int mappings where the key
+      is a year found in the "select voting period" dropdown filter, and the
+      value is the index in the dropdown field, which is needed in the
+      POST request.
+  """
+
+
+  def __init__(self, soup):
+    self.current_page = None
+    self.next_page = None
+    self.next_page_target = None
+    self.next_page_arg = None
+    self.year_dropdown_indices = {}
+
+    # parse the year dropdown
+    dropdown = soup.find(id=YEAR_SELECTOR_ID)
+    list_items = dropdown.select('div > ul > li')
+    for (num, li) in enumerate(list_items, 1):
+      self.year_dropdown_indices[li.text] = num
+
+    # find the paginated results heading for the vote table
+    table = soup.find(id=VOTING_GRID_ID)
+    page_elements = table.select('thead > tr.rgPager > td > table > tbody > tr > td > div > a.rgCurrentPage')
+
+    if len(page_elements):
+      page_element = page_elements[0]
+      self.current_page = page_element.span.text
+      next_page_element = page_element.next_sibling
+      try:
+        next_page = next_page_element.span.text
+
+        if next_page == '...':
+          next_page = str(int(self.current_page) + 1)
+
+        # the "page N" links are actually javascript callouts to this
+        # "doPostBack" function.  the arguments to doPostBack are the
+        # __EVENTTARGET and __EVENTARGUMENT fields in the resulting POST.
+        href = next_page_element['href']
+        match = re.match(".*doPostBack\('([^']*)','([^']*)'\)", href)
+
+        self.next_page = next_page
+        self.next_page_target = match.group(1)
+        self.next_page_arg = match.group(2)
+      finally:
+        return
+
 
 #
 # Main scraping functions
 #
-def scrape_proposal_page(browser, proposal_url):
+def scrape_proposal_page(proposal_url, file_number):
     """
     Navigates to the page giving details about a piece of legislation, scrapes
     that data, and adds a model to the database session. Returns the new DB
     model.
     """
-    browser.get(proposal_url)
-
-    file_number = int(extract_text(browser.find_element_by_css_selector(
-        '#ctl00_ContentPlaceHolder1_lblFile2'
-    )))
-    proposal_title = extract_text(browser.find_element_by_css_selector(
-        '#ctl00_ContentPlaceHolder1_lblTitle2'
-    ))
-    proposal_type = extract_text(browser.find_element_by_css_selector(
-        '#ctl00_ContentPlaceHolder1_lblIntroduced2'
-    ))
-    proposal_status = extract_text(browser.find_element_by_css_selector(
-        '#ctl00_ContentPlaceHolder1_lblStatus2'
-    ))
-    introduction_date = parse_date(extract_text(
-        browser.find_element_by_css_selector(
-            '#ctl00_ContentPlaceHolder1_lblIntroduced2'
-        )
-    ))
+    fetcher = LegistarNavigator()
+    soup = fetcher.fetch(
+        '%s/%s' % (BASE_SITE, proposal_url),
+        'file-%s' % (file_number))
+    try:
+      file_number = int(extract_text(soup.find(
+        id='ctl00_ContentPlaceHolder1_lblFile2')))
+      proposal_title = extract_text(soup.find(
+        id='ctl00_ContentPlaceHolder1_lblTitle2'))
+      proposal_type = extract_text(soup.find(
+        id='ctl00_ContentPlaceHolder1_lblIntroduced2'))
+      proposal_status = extract_text(soup.find(
+        id='ctl00_ContentPlaceHolder1_lblStatus2'))
+      introduction_date = parse_date(extract_text(soup.find(
+        id='ctl00_ContentPlaceHolder1_lblIntroduced2')))
+    except:
+      logging.warn('Unable to scrape proposal %s' % (file_number))
+      return
     
     db_proposal = db.Proposal(file_number, proposal_title)
     db_proposal.status = proposal_status
@@ -50,18 +179,17 @@ def scrape_proposal_page(browser, proposal_url):
     db_proposal.introduction_date = introduction_date
     
     db.session.add(db_proposal) 
-    db.session.flush()
-        # TODO probably should refactor this out a t least
-
+    db.session.commit()
     return db_proposal
 
-def scrape_vote_page(browser):
+
+def scrape_vote_page(soup):
     """
     Assuming the browser is on a page containing a grid of votes, scrapes
     the vote data to populate the database.
     """
     # Get the contents of the table
-    headers, rows = extract_grid_cells(browser, VOTING_GRID_ID)
+    headers, rows = extract_grid_cells(soup, VOTING_GRID_ID)
     # Do a quick check to ensure our assumption about the headers is correct
     assert headers[:6] == [
         u'File #', 
@@ -76,10 +204,7 @@ def scrape_vote_page(browser):
     supervisors = headers[6:]
     legislator_objects = {}
 
-    db.session.flush()
-
     # Pull values from each row and use them to populate the database
-    second_browser = webdriver.Firefox()
     try:
         for row in rows: 
             file_number = int(extract_text(row['File #']))
@@ -88,14 +213,15 @@ def scrape_vote_page(browser):
             # Find the proposal in the DB, or, if it isn't there,
             # create a record for it by scraping the info page about that 
             # proposal.
-            db_proposal = find_proposal(file_number) or scrape_proposal_page(
-                second_browser,
-                extract_href(row['File #'])
-            )
+            db_proposal = find_proposal(file_number) or (
+                scrape_proposal_page(row['File #'].a['href'], file_number))
+            if not db_proposal:
+              continue
 
             db_vote_event = db.VoteEvent(db_proposal, action_date)
             db.session.add(db_vote_event)
             db.session.flush()
+            db.session.commit()
 
             for name in supervisors:
                 vote_cast = extract_text(row[name])
@@ -106,132 +232,86 @@ def scrape_vote_page(browser):
                         vote_cast == 'Aye'
                     ))
     finally:
-        second_browser.close()
+      db.session.flush()
+      db.session.commit()
 
-def scrape_vote_listing(browser):
-    """
-    Starting from the first page and working to the last page, scrapes all
-    votes from a multi-page grid and populates the database.
-    """
-    page_number = 1
-    while select_grid_page(browser, VOTING_GRID_ID, page_number):
-        scrape_vote_page(browser)
-        db.session.flush()
-        page_number += 1
 
 def scrape_vote_years(year_range):
-    """
-    Opens the votes page and scrapes the votes for all years in the given range.
-    Populates the database and commits the transaction
-    """
-    browser = webdriver.Firefox()
+  """
+  Opens the votes page and scrapes the votes for all years in the given range.
+  Populates the database and commits the transaction
+  """
+  for year in year_range:
     try:
-        # Navigate to the Board of Supervisors page
-        browser.get('https://sfgov.legistar.com/MainBody.aspx')
+      # OK, so first we go to the frontpage and navigate our way to the
+      # voting results (this is necessary to get the wonderful snowflake
+      # of an app that legistar is to register some necessary server-side state.
+      fetcher = LegistarNavigator()
+      fetcher.fetch(VOTE_LISTING_FIRST_URL, 'frontpage')
 
-        # Click the votes tab
-        people_tab = browser.find_element_by_partial_link_text('Votes')
-        people_tab.click()
+      # From the front page, we click the "Votes" tab, which translates to
+      # a POST request to the server.
+      payload = json.load(file('payload-select-votes.json'))
+      payload['__EVENTTARGET'] = 'ctl00$ContentPlaceHolder1$tabTop'
+      payload['__EVENTARGUMENT'] = '{"type":0,"index":"2"}'
+      soup = fetcher.fetch(VOTE_PAGING_FORM_URL, 'votes-selected',
+                           payload=payload)
+      pager_info = VotingInterfaceInfo(soup)
 
-        # Scrape each year of votes
-        for year in year_range:
-            if not select_dropdown_option(
-                    browser,
-                    'ctl00_ContentPlaceHolder1_lstTimePeriodVoting_Input',
-                    str(year)
-                ):
-                raise Exception("Year not found in options.")
+      # Now we select a given year from a dropdown widget, which again
+      # translates to a POST request to the server.
+      payload = json.load(file('payload-year-select.json'))
+      payload['__EVENTTARGET'] = 'ctl00$ContentPlaceHolder1$lstTimePeriodVoting'
+      payload['__EVENTARGUMENT'] = '{"Command":"Select","Index":%s}' % (
+          pager_info.year_dropdown_indices[str(year)])
+      payload['ctl00$ContentPlaceHolder1$lstTimePeriodVoting'] = str(year)
+      payload['ctl00_ContentPlaceHolder1_lstTimePeriodVoting_ClientState'] = "{\"logEntries\":[],\"value\":\"%s\",\"text\":\"%s\",\"enabled\":true,\"checkedIndices\":[],\"checkedItemsTextOverflows\":false}" % (year, year)
 
-            scrape_vote_listing(browser)
+      # This gives some results, which may be paginated.
+      soup = fetcher.fetch(
+          VOTE_PAGING_FORM_URL, 
+          'vote-listings-%s-page-1' % (year,),
+          payload=payload)
+      scrape_vote_page(soup)
 
-        db.session.commit()
+      while True:
+        # repeat the process for every page in the paginated results.
+        pager_info = VotingInterfaceInfo(soup)
+        if pager_info.next_page == None:
+          break
+        payload = json.load(file('payload-page-select.json'))
+        payload['__EVENTTARGET'] = pager_info.next_page_target
+        payload['__EVENTARGUMENT'] = pager_info.next_page_arg
+        soup = fetcher.fetch(
+            VOTE_PAGING_FORM_URL,
+            'vote-listings-%s-page-%s' % (year, pager_info.next_page),
+            payload=payload)
+        scrape_vote_page(soup)
+
     except:
-        db.session.rollback()
-        raise
-    finally:
-        browser.close()
+      db.session.rollback()
+      raise
 
 #
 # Browser/DOM helpers
 #
-def select_dropdown_option(browser, selectbox_id, option_text):
-    """
-    Interacts with a Telerik select-style control to select the option
-    identified by the option_text.
-    """
-    # Click the select box so Telerik will dynamically populate it
-    selectbox = browser.find_element_by_id(
-        selectbox_id
-    )
-    selectbox.click()
 
-    # Wait for the dropdown to appear
-    time.sleep(PATIENCE)
-
-    # Get the option items
-    dropdown_id = selectbox_id.replace('Input', 'DropDown') #TODO hacky! 
-    dropdown = browser.find_element_by_id(dropdown_id)
-    option_items = dropdown.find_elements_by_css_selector(
-        'div:nth-child(1) > ul:nth-child(1) > li'
-    )
-
-    # Find the requested option
-    for li in option_items:
-        if option_text == extract_text(li):
-            li.click()
-            time.sleep(PATIENCE)
-            return True
-    
-    return False
-
-def select_grid_page(browser, grid_id, page_number):
-    """
-    Selects the specified page number for a grid view in the browser,
-    if that page number is visible as an option. Returns True on success,
-    false on failure.
-    """
-    table = browser.find_element_by_id(grid_id)
-    page_spans = table.find_elements_by_css_selector(
-        'thead > tr.rgPager > td > table > tbody > tr > td  a > span'
-    )
-
-    number_string = str(page_number)
-    for index, span in enumerate(page_spans):
-        span_text = extract_text(span)
-        if number_string == span_text:
-            span.click()
-            time.sleep(PATIENCE) # TODO is this needed?
-            return True
-        elif span_text == '...' and index == len(page_spans) - 1:
-            # We're on the last option and still haven't found ours,
-            # so it could be on the next "page" of pages
-            # (which we have to explicitly request with another page load)
-            span.click()
-            time.sleep(PATIENCE)
-            return select_grid_page(browser, grid_id, page_number)
-    
-    return False
-    
-
-def extract_grid_cells(browser, grid_id):
+def extract_grid_cells(soup, grid_id):
     """
     Given the ID of a legistar table, returns a list of dictionaries
     for each row mapping column headers to td elements.
     """
-    table = browser.find_element_by_id(grid_id)
+    table = soup.find(id=grid_id)
     
-    header_cells = table.find_elements_by_css_selector(
-        'thead:nth-child(2) > tr:nth-child(2) > th'
-    )
+    header_cells = table.find_all(class_='rgHeader')
     headers = [extract_text(cell) for cell in header_cells]
 
-    tbody = table.find_element_by_css_selector('tbody:nth-child(4)')
-    rows = tbody.find_elements_by_tag_name('tr')
+    rows = table.find_all(class_='rgRow')
 
     result_rows = []
     for row in rows:
         cells = {}
-        td_elements = row.find_elements_by_tag_name('td')
+        td_elements = row.find_all('td')
         for header, cell in zip(headers, td_elements):
             cells[header] = cell
 
@@ -244,13 +324,7 @@ def extract_text(element):
     Returns the text from an element in a nice, readable form with whitespace 
     trimmed and non-breaking spaces turned into regular spaces.
     """
-    return element.get_attribute('textContent').replace(u'\xa0', ' ').strip()
-
-def extract_href(element):
-    """
-    Returns the href property of the first link found in the element's tree.
-    """
-    return element.find_element_by_tag_name('a').get_attribute('href')
+    return element.get_text().replace(u'\xa0', ' ').strip()
 
 def parse_date(date_text):
     """
@@ -258,7 +332,7 @@ def parse_date(date_text):
     date object.
     """
     month, day, year = [int(field) for field in date_text.split('/')]
-    return date(year, month, day)
+    return datetime.date(year, month, day)
 
 #
 # DB helpers
@@ -287,18 +361,18 @@ def find_proposal(file_number):
         .first()
     )
 
-#
-# Main script
-#
-parser = argparse.ArgumentParser(description=
-    '''
-    Populate a database with several years of voting records from the San 
-    Francisco board of supervisors.
-    '''
-)
-parser.add_argument('first_year', metavar='first year', type=int)
-parser.add_argument('last_year', metavar='last year', type=int)
-args = parser.parse_args()
-
-scrape_vote_years(range(args.first_year, args.last_year + 1))
-    
+##
+## Main script
+##
+if __name__ == '__main__':
+  logging.basicConfig(level='INFO')
+  parser = argparse.ArgumentParser(description=
+      '''
+      Populate a database with several years of voting records from the San 
+      Francisco board of supervisors.
+      '''
+  )
+  parser.add_argument('first_year', metavar='first year', type=int)
+  parser.add_argument('last_year', metavar='last year', type=int)
+  args = parser.parse_args()
+  scrape_vote_years(range(args.first_year, args.last_year + 1))

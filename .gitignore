@@ -1,0 +1,4 @@
+cache
+vote_db.sqlite
+*.pyc
+.*.swp
