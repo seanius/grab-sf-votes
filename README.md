@@ -3,7 +3,8 @@ A Legistar Vote Scraper
 
 This is a little script that pulls information about past votes from the San 
 Francisco Board of Supervisors' antiquated Legistar website and uses it to
-fill a sqlite database.
+fill a sqlite database.  'antiquated' is a euphemism, really.  It's a horrible
+beast of an application.
 
 Usage
 -----
