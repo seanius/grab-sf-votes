@@ -18,9 +18,16 @@ Dump all the vote data from 2010 to 2014:
 
 Setup
 -----
-You will probably need to run ``pip install -r requirements.txt`` to satisfy
-module dependencies. The reset_db script also relies on the sqlite3 command 
-line program, but any sqlite client will do to fill in the schema.
+You will probably need to run
+
+	pip install -r requirements.txt
+	
+to satisfy module dependencies. The reset_db script also relies on
+the sqlite3 command line program, but any sqlite client will do to
+fill in the schema.  You'll also need to download some datafiles
+for the TextBlob support
+
+	python -m textblob.download_corpora    
 
 Practicalities
 --------------

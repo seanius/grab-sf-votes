@@ -21,6 +21,7 @@ import os
 import re
 import requests
 import tempfile
+import textblob
 import time
 
 #############
@@ -172,11 +173,16 @@ def scrape_proposal_page(proposal_url, file_number):
     except:
       logging.warn('Unable to scrape proposal %s' % (file_number))
       return
-    
+
     db_proposal = db.Proposal(file_number, proposal_title)
     db_proposal.status = proposal_status
     db_proposal.proposal_type = proposal_type
     db_proposal.introduction_date = introduction_date
+
+    blob = textblob.TextBlob(proposal_title)
+    for blob_phrase in set(map(unicode, blob.noun_phrases)):
+      db_proposal.noun_phrases.append(
+          db.get_or_create(db.session, db.NounPhrase, phrase=blob_phrase))
     
     db.session.add(db_proposal) 
     db.session.commit()
