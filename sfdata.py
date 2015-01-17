@@ -20,10 +20,6 @@ class SodaEndPoint(object):
     return self.__class__.__name__
 
   @property
-  def field_maps(self):
-    raise NotImplemented("Must define this in subclass")
-
-  @property
   def cache_file(self):
     return "%s.json" % (self.name)
 
