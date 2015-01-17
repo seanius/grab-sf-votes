@@ -1,4 +1,5 @@
 cache
 vote_db.sqlite
+LobbyistActivity.json
 *.pyc
 .*.swp
