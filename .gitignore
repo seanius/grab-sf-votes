@@ -1,5 +1,8 @@
-cache
-vote_db.sqlite
-LobbyistActivity.json
 *.pyc
 .*.swp
+Contacts.json
+FirmToDeptContacts.json
+LobbyistActivity.json
+Timeline.json
+cache
+vote_db.sqlite
