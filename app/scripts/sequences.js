@@ -169,7 +169,7 @@ function createVisualization(json) {
       .attr("display", function(d) { return d.depth ? null : "none"; })
       .attr("d", arc)
       .attr("fill-rule", "evenodd")
-      .style("fill", function(d) { var col = getColor(d.name); console.log(d.name+': '+col); return col; })
+      .style("fill", function(d) { return getColor(d.name); })
       .style("opacity", 1)
       .on("mouseover", mouseover);
 
