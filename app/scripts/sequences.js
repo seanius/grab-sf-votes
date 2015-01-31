@@ -97,7 +97,7 @@ function buildColors(total) {
   for (var x=0; x<total; x++)
   {
     rgb = hsvToRgb(i * x, 100, 100);
-	r.push('#'+rgb[0].toString(16)+rgb[1].toString(16)+rgb[2].toString(16));
+	r.push('rgb(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ')');
   }
   return r;
 };
@@ -169,7 +169,7 @@ function createVisualization(json) {
       .attr("display", function(d) { return d.depth ? null : "none"; })
       .attr("d", arc)
       .attr("fill-rule", "evenodd")
-      .style("fill", function(d) { return getColor(d.name); })
+      .style("fill", function(d) { var col = getColor(d.name); console.log(d.name+': '+col); return col; })
       .style("opacity", 1)
       .on("mouseover", mouseover);
 

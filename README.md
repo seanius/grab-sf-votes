@@ -138,6 +138,3 @@ in the d3 gallery.  I do my best to credit the sources for the javascript/html.
  * find a straightforward way to host this
  * get more data
  * visualization/frontend work
-   * automatic color generation is *still* not working for the frontend, I
-     have to figure out what I'm not doing right here.
-
