@@ -1,6 +1,7 @@
 #! /usr/bin/python
 
 import collections
+import datetime
 import dateutil.parser
 import json
 import os
@@ -38,10 +39,11 @@ def file_numbers(record):
       pass
   return numbers
 
-def iso_datetime(date_string):
-  return dateutil.parser.parse(date_string)
+def parse_date(date_string):
+  """Extract a datetime.date object from a given string."""
+  return dateutil.parser.parse(date_string).date()
 
-def timeline_report():
+def timeline_report(_):
   timelines = {}
   for record in sfdata.LobbyistActivity().records():
     for file_number in file_numbers(record):
@@ -54,14 +56,15 @@ def timeline_report():
           timelines[file_number] = timeline
         else:
           timeline = timelines[file_number]
-        ts = time.mktime(iso_datetime(record['date']).timetuple())
+        ts = time.mktime(parse_date(record['date']).timetuple())
         timeline.add_event(ts, record)
 
   return [timelines[filenum].json() for filenum in sorted(timelines)] 
 
-def contacts_report(since_when):
+def contacts_report(since_when, until_when):
   records = [r for r in sfdata.LobbyistActivity().records()
-             if iso_datetime(r['date']) >= since_when]
+             if parse_date(r['date']) >= since_when
+             and parse_date(r['date']) <= until_when]
   contacts = collections.defaultdict(
       lambda: collections.defaultdict(
           lambda: collections.defaultdict(
@@ -78,9 +81,34 @@ def contacts_report(since_when):
           yield ('%s,%s' % (urllib.quote(key), count)).encode('utf-8')
 
 
-def contact_mapping_report(since_when):
+def department_topics_report(since_when, until_when):
+  min_threshold = 4
+
   records = [r for r in sfdata.LobbyistActivity().records()
-             if iso_datetime(r['date']) >= since_when]
+             if parse_date(r['date']) >= since_when
+             and parse_date(r['date']) <= until_when]
+  by_topic = collections.defaultdict(lambda: collections.defaultdict(lambda: 0))
+
+  def clean(str):
+    return urllib.quote(str).replace('-', ' ').replace(',', ' ').encode('utf-8')
+
+  for r in records:
+    department = clean(r['official_department'])
+    topic = clean(r['lobbyingsubjectarea'])
+    by_topic[department][topic] += 1
+
+  for department in sorted(by_topic):
+    for topic in sorted(by_topic[department]):
+      count = by_topic[department][topic]
+      key = '-'.join([department, topic])
+      if count > min_threshold:
+        yield ('%s,%s' % (key, count)).encode('utf-8')
+
+
+def contact_mapping_report(since_when):
+  """Note: Currently unused, may need to re-write."""
+  records = [r for r in sfdata.LobbyistActivity().records()
+             if parse_date(r['date']) >= since_when]
   officials = set([r['official_department'] for r in records])
   clients = set([r['lobbyist_firm'] for r in records])
   matrix_positions = {}
@@ -98,18 +126,30 @@ def contact_mapping_report(since_when):
 
   return {'mappings': reverse_mappings, 'matrix': matrix}
 
+def write_report_as(filename, data):
+  tf = tempfile.NamedTemporaryFile(delete=False) 
+  tf.write(data)
+  tf.close()
+  os.rename(tf.name, 'data/%s' % filename)
+
 if __name__ == '__main__':
-  since_when = iso_datetime(sys.argv[1])
+  default_start = datetime.date.today() - datetime.timedelta(days=365)
+  default_end = datetime.date.today() + datetime.timedelta(days=1)
+  try:
+    since_when = parse_date(sys.argv[1])
+  except:
+    since_when = default_start
+  try:
+    until_when = parse_date(sys.argv[2])
+  except:
+    until_when = default_end
 
-  tf = tempfile.NamedTemporaryFile(delete=False) 
-  tf.write(json.dumps(timeline_report()))
-  tf.close()
-  os.rename(tf.name, 'Timeline.json')
+  write_report_as('Timeline.json', json.dumps(timeline_report(since_when)))
+  write_report_as(
+      'FirmToDeptContacts.csv',
+      '\n'.join(contacts_report(since_when, until_when)))
 
-  tf = tempfile.NamedTemporaryFile(delete=False) 
-  tf.write('\n'.join(contacts_report(since_when)))
-  tf.close()
-  os.rename(tf.name, 'FirmToDeptContacts.csv')
-
-
+  write_report_as(
+      'ByDepartmentByTopic.csv',
+      '\n'.join(department_topics_report(since_when, until_when)))
 

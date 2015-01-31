@@ -1,14 +1,11 @@
 #! /usr/bin/python
 
-import collections
-import datetime
 import json
 import logging
-import networkx
-import networkx.readwrite.json_graph.node_link as networkx_json
 import os
 import requests
 import tempfile
+
 
 class SodaEndPoint(object):
   @property
