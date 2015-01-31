@@ -1,6 +1,6 @@
 // Cargo-culted, hacked, and maimed version of the sequences sunburst:
 //        http://bl.ocks.org/kerryrodden/7090426
-var width = 750;
+var width = 850;
 var height = 600;
 var radius = Math.min(width, height) / 2;
 
